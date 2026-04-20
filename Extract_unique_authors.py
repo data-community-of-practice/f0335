@@ -42,9 +42,9 @@ def normalise_tokens(name):
     """
     Given a raw name string, return a list of possible (family, givens_set)
     interpretations. We try:
-      1. Comma format: "Rossell, Susan L." -> family=rossell, givens={susan, l}
-      2. Standard order: "Susan L. Rossell" -> family=rossell, givens={susan, l}
-      3. Reversed order: "Rossell Susan" -> family=rossell, givens={susan}
+      1. Comma format: "Smith, John J." -> family=smith, givens={smith, j}
+      2. Standard order: "John J. Smith" -> family=smith, givens={john, j}
+      3. Reversed order: "Smith John" -> family=smith, givens={john}
     We return all plausible interpretations so matching can try each.
     """
     # Remove periods and normalise
@@ -81,13 +81,13 @@ def normalise_tokens(name):
 
 def initials_expand(token):
     """
-    If token is multiple uppercase initials concatenated (e.g., 'sl'),
-    split into individual initials ['s', 'l'].
+    If token is multiple uppercase initials concatenated (e.g., 'jj'),
+    split into individual initials ['j', 'j'].
     """
     if len(token) <= 1:
         return [token]
     if all(c.isalpha() for c in token) and len(token) <= 3:
-        # Could be concatenated initials like "sl" or "sj"
+        # Could be concatenated initials like "jj" or "sj"
         return list(token)
     return [token]
 
@@ -95,7 +95,7 @@ def initials_expand(token):
 def givens_compatible(givens_a, givens_b):
     """
     Check if two sets of given-name tokens are compatible.
-    Handles: full names, single initials, and concatenated initials (e.g., 'sl').
+    Handles: full names, single initials, and concatenated initials (e.g., 'jj').
     """
     # Expand concatenated initials
     expanded_a = set()
