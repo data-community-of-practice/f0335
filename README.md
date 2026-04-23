@@ -1,132 +1,188 @@
 # f0335
-BDBSF Extract unique co-authors
+# Normalise & Merge Crossref Authors
 
-# Unique Author Extractor
+A Python script that reads the structured author metadata produced by [f0334](https://github.com/data-community-of-practice/f0334), deduplicates author appearances across publications, and outputs a single JSON file of researcher entities with merged name variants, publication lists, and deduplicated affiliations.
 
-A Python script that extracts unique authors from the output of [Crossref Author Fetch](./README.md), normalises name variants, and produces a clean Excel file mapping each unique author to their associated DOIs.
+Entries that cannot be auto-merged with confidence are flagged as `similar_to` links for manual review.
 
-## The problem
+## Pipeline context
 
-Crossref records the same author in different formats across publications. A single researcher might appear as:
+```
+f0334  →  Crossref_AuthorMetadata.json
+f0335  →  Normalised_Authors.json
+```
 
-- John J. Smith
-- John J Smith
-- John Smith
-- JJ Smith
-- Smith John
-- Smith, John J.
+`f0334` fetches one author record per appearance per DOI. The same researcher can appear dozens of times across publications, with slightly different name forms (`"Jane L. Doe"`, `"J.L. Doe"`, `"Jane Doe"`). This script collapses those appearances into one researcher entity per person.
 
-This script recognises all of these as the same person and merges them into one entry.
+## How it works
 
-## How name matching works
+The script runs five sequential steps:
 
-The algorithm uses a multi-step approach:
+### Step A — Fix surname-first entries
+Detects records where given and family name are swapped (e.g. `given="Doe"`, `family="Jane L."`) and corrects the order before any matching begins. Only high-confidence cases are fixed: those where the `family` field contains a period but the `given` field does not.
 
-1. **Clean**: Strip periods, extra whitespace, and normalise hyphens.
-2. **Parse**: Detect comma format ("Rossell, Susan") and flip to standard order. For non-comma names, try both "Given Family" and "Family Given" interpretations.
-3. **Expand initials**: Concatenated initials like "SL" are split into individual letters for matching.
-4. **Match**: Two names are considered the same person if they share a family name AND their given-name tokens are compatible — meaning one set is a subset of the other, with initials matching by first character (e.g., "S" matches "Susan").
-5. **Merge**: The longest (most complete) name form is kept as the canonical version. A second merge pass catches clusters that only become matchable after initial expansion.
+### Step B — ORCID-based merge
+Any two appearances that share the same ORCID are merged unconditionally. This is the most reliable merge signal.
+
+### Step C — Normalised-name merge
+Appearances without ORCID are merged if their **merge key** is identical. The merge key is constructed by:
+- Stripping periods (`"J."` → `"j"`)
+- Normalising whitespace
+- Expanding compressed initials (`"JL"` → `"j l"`)
+- Keeping full words intact
+
+This means `"Jane L. Doe"` and `"Jane L Doe"` auto-merge, and `"J.L. Doe"` and `"JL Doe"` auto-merge — but `"Jane L. Doe"` and `"J.L. Doe"` do **not** auto-merge (initial-to-full is only flagged, not assumed). Non-ORCID appearances whose merge key matches an existing ORCID cluster are absorbed into that cluster.
+
+### Step D — Build researcher nodes
+Each cluster of merged appearances is consolidated into one researcher object. The most complete name form (longest given name) is chosen as the canonical name. Affiliations across all appearances are deduplicated using token-based Jaccard similarity (threshold: 0.80), keeping the longest version and filling in any missing ROR or place data from variants.
+
+### Step E — Flag similar pairs
+Researchers that were not auto-merged but may still be the same person are linked via `similar_to`. Cases flagged include:
+
+| Case | Example |
+|------|---------|
+| Initial vs full name | `"J.L. Doe"` ~ `"Jane L. Doe"` |
+| Missing name parts | `"Jane Doe"` ~ `"Jane L. Doe"` |
+| Spelling variant (≤2 edits) | `"John Mathew Smith"` ~ `"John Matthew Smith"` |
+| Hyphenated vs space-separated | `"McCarthy-Jones"` ~ `"McCarthy Jones"` |
+| Surname-first swap | `"Doe Jane"` ~ `"Jane Doe"` |
+
+## Output
+
+One file: **`Normalised_Authors.json`** — a JSON array of researcher objects.
+
+### Researcher object
+
+```json
+{
+  "id": "3f2a1b4c-...",
+  "given": "Jane Louise",
+  "family": "Doe",
+  "full_name": "Jane Louise Doe",
+  "orcid": "0000-0001-2345-6789",
+  "name_variants": ["J.L. Doe", "Jane Doe", "Jane L. Doe", "Jane Louise Doe"],
+  "publications": ["10.1111/aaa.001", "10.1111/aaa.007"],
+  "affiliations": [
+    {
+      "name": "Department of Science, Example University",
+      "ror": "https://ror.org/0153tk833",
+      "place": "Melbourne, Australia"
+    }
+  ],
+  "similar_to": [
+    {
+      "id": "9e8d7c6b-...",
+      "full_name": "J. Doe",
+      "orcid": null
+    }
+  ],
+  "merge_confidence": "orcid"
+}
+```
+
+### Fields
+
+| Field | Description |
+|-------|-------------|
+| `id` | UUID assigned to this researcher entity. |
+| `given` | Best available given name (longest form seen). |
+| `family` | Family name. |
+| `full_name` | `given + family` combined. |
+| `orcid` | ORCID identifier, or `null`. |
+| `name_variants` | All distinct name strings seen across appearances, sorted. |
+| `publications` | Deduplicated list of DOIs this researcher appears on, sorted. |
+| `affiliations` | Deduplicated affiliation objects. Each has `name`; optionally `ror` and `place`. |
+| `similar_to` | List of other researchers flagged as possibly the same person (for manual review). Each entry has `id`, `full_name`, and `orcid`. |
+| `merge_confidence` | `"orcid"` if the cluster was anchored by an ORCID match; `"name"` otherwise. |
 
 ## Requirements
 
 - Python 3.7+
-- Library: `openpyxl`
-
-```bash
-pip install openpyxl
-```
-
-## Input file format
-
-The script expects an Excel file with at minimum these two columns in the header row:
-
-| Column | Description |
-|---|---|
-| `Publication_DOI` | The DOI for each publication |
-| `Crossref_Authors` | Semicolon-separated author names (as produced by `crossref_author_fetch.py`) |
-
-Rows where `Crossref_Authors` starts with `[DOI not found]`, `[No authors listed]`, or `[Error` are skipped automatically.
+- No external libraries (standard library only)
 
 ## Usage
 
-### From a terminal / command prompt
+```bash
+python f0335.py
+```
+
+By default the script looks for `Crossref_AuthorMetadata.json` in the current directory, then in the script's own directory.
+
+Specify paths explicitly:
 
 ```bash
-python extract_unique_authors.py input.xlsx
+python f0335.py path/to/Crossref_AuthorMetadata.json --output path/to/Normalised_Authors.json
 ```
 
-Optionally specify an output filename:
-
-```bash
-python extract_unique_authors.py input.xlsx custom_output.xlsx
-```
-
-### From Spyder (IPython console)
+### From Spyder or Jupyter
 
 ```python
-!python "E:\your\folder\extract_unique_authors.py" "E:\your\folder\input.xlsx"
+!python "E:\your\folder\f0335.py"
 ```
 
-### From a Jupyter notebook
-
-```python
-!python extract_unique_authors.py input.xlsx
-```
-
-## Output
-
-The script produces an Excel file named `<input_name>_unique_authors.xlsx` with four columns:
-
-| Column | Description |
-|---|---|
-| `Author_Name` | The canonical (most complete) form of the author's name |
-| `Name_Variants` | Other name forms that were merged into this entry, semicolon-separated. Use this column to audit merges. |
-| `DOI_Count` | Number of unique DOIs associated with this author |
-| `DOIs` | All associated DOIs, semicolon-separated |
-
-### Example output
-
-| Author_Name | Name_Variants | DOI_Count | DOIs |
-|---|---|---|---|
-| John J. Smith | Smith John; Smith, John; JJ Smith; John J Smith; John Smith | 6 | 10.1111/aaa.001; 10.1111/aaa.002; ... |
-| Jane A. Doe | Jane Doe | 3 | 10.1111/aaa.001; 10.1111/aaa.004; ... |
-
-The output file includes a frozen header row and auto-filters for easy sorting and searching.
-
-## Typical workflow
-
-This script is designed to run after `crossref_author_fetch.py`:
+## Console output
 
 ```
-1. Start with:  Publications_with_high_confidence.xlsx
-                  (has Publication_DOI column)
+Input:  /path/to/Crossref_AuthorMetadata.json
+Output: /path/to/Normalised_Authors.json
 
-2. Run:         python crossref_author_fetch.py Publications_with_high_confidence.xlsx
-   Produces:    Publications_with_high_confidence_with_crossref_authors.xlsx
-                  (adds Crossref_Authors column)
+DOIs in input: 412
+Total author appearances: 3847
 
-3. Run:         python extract_unique_authors.py Publications_with_high_confidence_with_crossref_authors.xlsx
-   Produces:    Publications_with_high_confidence_with_crossref_authors_unique_authors.xlsx
-                  (one row per unique author with their DOIs)
+Step A: Fixing surname-first entries...
+  Fixed: 3
+
+Step B: Merging by ORCID...
+  ORCID clusters: 891
+
+Step C: Merging non-ORCID by normalised name...
+  Total clusters: 2104
+
+Step D: Building researcher nodes...
+  Researchers: 2104
+
+Step E: Finding similar pairs...
+  Similar pairs: 47
+
+============================================================
+NORMALISATION SUMMARY
+============================================================
+Input appearances:          3847
+Deduplicated researchers:   2104
+  With ORCID:               891
+  Without ORCID:            1213
+  Multi-publication:        318
+  Merged name variants:     204
+  Flagged similar:          89 (47 pairs)
+
+Top merged researchers:
+  Jane Louise Doe [ORCID: 0000-0001-2345-6789]
+    Variants: ['J.L. Doe', 'Jane Doe', 'Jane L. Doe', 'Jane Louise Doe']
+    Pubs: 6
+  ...
+
+Similar pairs (review manually):
+  "J. Doe"  ~  "Jane Doe"
+  ...
+
+Saved: /path/to/Normalised_Authors.json
 ```
 
-## Limitations and caveats
+## Reviewing similar pairs
 
-**False positives**: Purely algorithmic name matching cannot distinguish between two different researchers who share the same family name and compatible initials (e.g., two different people both named "J. Smith"). Always review the `Name_Variants` column to catch incorrect merges.
+The `similar_to` field lists researcher IDs and names that could not be automatically merged. To decide whether to merge them:
 
-**False negatives**: The script may fail to merge names with significantly different spellings, transliterations, or major typos that go beyond formatting differences. For example, "Müller" vs "Mueller" would not be matched.
+1. Compare `name_variants` of both entries — do the name forms overlap in a way that suggests one person?
+2. Check `affiliations` — do they share an institution?
+3. Check `publications` — do they co-appear on papers, or appear in different research areas?
 
-**Family name assumption**: The script assumes the family name is a single token (the last word in standard order). Multi-word family names without a comma (e.g., "Van Rheenen") are handled by trying both orderings, but unusual structures may occasionally be misinterpreted.
+Manual merges are outside the scope of this script and should be handled in a downstream step.
 
-## Troubleshooting
+## Limitations
 
-| Problem | Solution |
-|---|---|
-| `Could not find 'Crossref_Authors' column` | The input file must have a column with this exact header. Run `crossref_author_fetch.py` first. |
-| `Could not find 'Publication_DOI' column` | The input file must have a column named exactly `Publication_DOI`. |
-| Unexpected merges in output | Check the `Name_Variants` column. If two different people were merged, they share a family name and compatible initials — this is a known limitation. |
-| Missing authors in output | Authors from rows with error messages (`[DOI not found]`, etc.) are skipped. Check the input file for these. |
+- **False positives (over-merging)**: Two different researchers with the same family name and identical initials will be merged. Review `name_variants` and `publications` to catch this.
+- **False negatives (under-merging)**: Significantly different spellings or transliterations (e.g. `"Müller"` vs `"Mueller"`) are not matched and will appear as `similar_to` candidates at best.
+- **ORCID coverage**: Not all Crossref records include ORCID. The majority of merges rely on name normalisation, which is inherently heuristic.
 
 ## License
 
